@@ -8,6 +8,8 @@ It helps deduplicating images while preserving the metadata of your chosing. The
 [!WARNING]
 External libraries are currently not supported and could provide unknown behavior.
 
+![Example usage](images/usage_example.png)
+
 
 ### Selectable and automatic preselection of metadata:
 Specific metadata (that is supported by the [immich API](https://immich.app/docs/api/update-asset)) is selectable to be applied to the final image.
