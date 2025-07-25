@@ -79,12 +79,12 @@ class ImageResolution(Enum):
 
 @st.cache_data(max_entries=25)
 def get_asset_image(asset_id: str, resolution: ImageResolution):
-    print(f"Fetching image for asset_id: {asset_id} with resolution: {resolution}")
+    logger.info(f"Fetching image for asset_id: {asset_id} with resolution: {resolution}")
     """Fetches an image for a given asset ID and resolution."""
     if resolution == ImageResolution.THUMBNAIL or resolution == ImageResolution.FULLSIZE:
-        image = get_from_authenticated_api(f"assets/{asset_id}/thumbnail?size={resolution.value}", type="octet-stream")
+        image = get_from_authenticated_api(f"assets/{asset_id}/thumbnail?size={resolution.value}", accept_type="octet-stream")
     else:
-        image = get_from_authenticated_api(f"assets/{asset_id}/original", type="octet-stream")
+        image = get_from_authenticated_api(f"assets/{asset_id}/original", accept_type="octet-stream")
     if image:
         image_bytes = BytesIO(image.content)
         try:
@@ -97,6 +97,7 @@ def get_asset_image(asset_id: str, resolution: ImageResolution):
             image_bytes.close()
     return None
 
+
 def get_asset_info(asset_id: str) -> dict | None:
     """"Fetches asset information for a given asset ID."""
     info = get_from_authenticated_api(f"assets/{asset_id}")
@@ -104,92 +105,77 @@ def get_asset_info(asset_id: str) -> dict | None:
         return info.json()
     return None
 
-def deleteAsset(immich_server_url, asset_id, api_key):
-    st.session_state['show_faiss_duplicate'] = False
-    url = f"{immich_server_url}/api/asset"
+
+def delete_assets(asset_ids: list[str]):
     payload = json.dumps({
         "force": True,
-        "ids": [asset_id]
+        "ids": [asset_ids]
     })
-    headers = {
-        'Content-Type': 'application/json',
-        'x-api-key': api_key
-    }
+    print(payload)
+    result = delete_authenticated_api("assets", payload)
+    if result:
+        logger.info(f"Delete assets resulted in: {result.json()}")
 
-    try:
-        response = requests.delete(url, headers=headers, data=payload)
-        if response.status_code == 204:
-            st.success(f"Successfully deleted asset with ID: {asset_id}")
-            print(f"Successfully deleted asset with ID: {asset_id}")
-            return True
-        else:
-            # Provide more detailed error feedback
-            error_message = response.json().get('message', 'No additional error message provided.')
-            st.error(f"Failed to delete asset with ID: {asset_id}. Status code: {response.status_code}. Message: {error_message}")
-            print(f"Failed to delete asset with ID: {asset_id}. Status code: {response.status_code}. Message: {error_message}")
-            return False
-    except requests.RequestException as e:
-        # Handle request-related exceptions
-        st.error(f"Request failed: {str(e)}")
-        print(f"Request failed: {str(e)}")
-        return False
 
-def updateAsset(immich_server_url, asset_id, api_key, dateTimeOriginal, description, isFavorite, latitude, longitude, isArchived):
-    url = f"{immich_server_url}/api/asset/{asset_id}"  # Ensure the URL is constructed correctly
-    
-    payload = json.dumps({
-        "dateTimeOriginal": dateTimeOriginal,
-        "description": description,
-        "isArchived": isArchived,
-        "isFavorite": isFavorite,
-        "latitude": latitude,
-        "longitude": longitude
-    })
-    
-    headers = {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'x-api-key': api_key  # Authorization via API key
-    }
 
-    try:
-        response = requests.put(url, headers=headers, data=payload)
-        if response.status_code == 200:
-            response_data = response.json()
-            st.success(f"Successfully move on archive asset with ID: {asset_id}")
-            print(f"Successfully move on archive asset with ID: {asset_id}. Response: {response_data}")
-            return True
-        else:
-            error_message = response.json().get('message', 'No additional error message provided.')
-            st.error(f"Failed to move on archive asset with ID: {asset_id}. Status code: {response.status_code}. Message: {error_message}")
-            print(f"Failed to move on archive asset with ID: {asset_id}. Status code: {response.status_code}. Message: {error_message}")
-            return False
-    except requests.RequestException as e:
-        st.error(f"Request failed: {str(e)}")
-        print(f"Request failed: {str(e)}")
-        return False
+def update_asset(asset_id, metadata_to_update: dict):
+    payload = json.dumps(metadata_to_update)
+    result = put_authenticated_api(f"assets/{asset_id}", payload=payload)
+    if result:
+        logger.info(f"Update asset resulted in: {result.json()}")
 
 
 def get_duplicates():
-    response = get_from_authenticated_api("duplicates", type="octet-stream")
+    response = get_from_authenticated_api("duplicates", accept_type="octet-stream")
     if response:
         return response.json()
     return None
 
 
-def get_from_authenticated_api(endpoint: str, type="json", params=None) -> requests.Response | None:
+def get_from_authenticated_api(endpoint: str, accept_type="json", content_type=None, payload=None) -> requests.Response | None:
     """Fetch data from the Immich API with API key."""
     if not st.session_state['immich_server_url'] or not st.session_state['immich_api_key']:
         logging.error(f"{st.session_state['immich_server_url']=} and {st.session_state['immich_api_key']=} must be set before making requests.")
         return None
     
+    headers = {'Accept': f'application/{accept_type}',
+               'x-api-key': st.session_state['immich_api_key']}
+
+    return try_api_request("GET", endpoint, headers)
+
+
+def put_authenticated_api(endpoint: str, payload=None) -> requests.Response | None:
+    """Put data on the Immich API with API key."""
+    if not st.session_state['immich_server_url'] or not st.session_state['immich_api_key']:
+        logging.error(f"{st.session_state['immich_server_url']=} and {st.session_state['immich_api_key']=} must be set before making requests.")
+        return None
+    
+    headers = {'Accept': 'application/json',
+               'x-api-key': st.session_state['immich_api_key'],
+               'Content-Type': 'application/json'}
+
+    return try_api_request("PUT", endpoint, headers, payload)
+
+
+def delete_authenticated_api(endpoint: str, payload=None) -> requests.Response | None:
+    """Delete data from the Immich API with API key."""
+    if not st.session_state['immich_server_url'] or not st.session_state['immich_api_key']:
+        logging.error(f"{st.session_state['immich_server_url']=} and {st.session_state['immich_api_key']=} must be set before making requests.")
+        return None
+    
+    headers = {'Content-Type': 'application/json',
+               'x-api-key': st.session_state['immich_api_key']}
+    
+    return try_api_request("DELETE", endpoint, headers, payload)
+
+
+def try_api_request(method: str, endpoint: str, headers, payload=None) -> requests.Response | None:
     url = f"{st.session_state['immich_server_url']}/api/{endpoint.lstrip('/')}"
-    headers = {'Accept': f'application/{type}', 'x-api-key': st.session_state['immich_api_key']}
-    logging.debug(f"Fetching data from {url=} with {headers=} and {params=}")
     try:
-        response = requests.get(url, headers=headers, params=params, timeout=st.session_state['request_timeout'])
+        response = requests.request(method, url, headers=headers, params=payload, timeout=st.session_state['request_timeout'])
+        logging.info(f"Executing API call {method} {url=} with {headers=} and {payload=} returned status code: {response.status_code}")
         response.raise_for_status()
         return response
     except requests.exceptions.RequestException as e:
-        logger.error(f"Error fetching data from {url}: {e}")
+        logger.error(f"Error executing API call {method} {url}: {e}")
     return None

@@ -88,7 +88,17 @@ def setup_sidebar():
         elif st.session_state.immich_api_connected:
             st.sidebar.badge(
                 "Connected", icon=":material/check_circle:", color="green")
+        
         save_settings()
+    
+    st.sidebar.markdown("---")
+    if st.session_state.immich_api_connected:
+        if st.sidebar.button("Reload duplicates from immich."):
+            st.session_state['duplicates'] = None
+            st.session_state['duplicates_count'] = 0
+            st.session_state['duplicate_number'] = 0
+            st.session_state['image_files'] = {}
+            st.rerun()
     st.sidebar.markdown("---")
     st.sidebar.selectbox("Load image quality", ["Thumbnail (fast)", "Original (slow)"], key="load_image_quality",
                          help="Select the image quality to load. Thumbnail is faster but lower quality, Original is slower but full quality.")

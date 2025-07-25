@@ -1,7 +1,6 @@
 from datetime import datetime
 import streamlit as st
 from datetime import datetime
-from immich import deleteAsset, updateAsset
 
 def compare_and_color_data(value1, value2):
     date1 = datetime.fromisoformat(value1.rstrip('Z'))

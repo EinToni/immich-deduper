@@ -31,6 +31,8 @@ def main():
         imageDuplicate.load_duplicates_from_server()
         if st.session_state.duplicates:
             imageDuplicate.display_duplicates()
+        else:
+            st.text("No duplicates found!")
 
 
 if __name__ == "__main__":
