@@ -1,10 +1,7 @@
 import streamlit as st
 import time
 from imagehash import phash
-from db import saveAssetInfoToDb, isAssetProcessed
-from immichApi import streamAsset
 import gc 
-from faissCalc import update_faiss_index
 
 def calculatepHashPhotos(assets, immich_server_url, api_key):
     if 'message' not in st.session_state or st.button('Start Processing'):
@@ -138,3 +135,13 @@ def calculateFaissIndex(assets, immich_server_url, api_key):
         st.session_state['message'] = "Processing complete!"
         message_placeholder.text(st.session_state['message'])
         progress_bar.progress(1.0)
+
+def calculate_image_hash(image):
+    image = image.convert("RGB")  # Normalize color space
+    return phash(image)
+
+def absolute_duplicates(image1, image2):
+    """Check if two images are absolute duplicates based on their perceptual hash."""
+    hash1 = calculate_image_hash(image1)
+    hash2 = calculate_image_hash(image2)
+    return hash1 - hash2 == 0

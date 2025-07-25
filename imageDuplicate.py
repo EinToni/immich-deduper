@@ -1,19 +1,22 @@
 import os
+import pandas as pd
 import streamlit as st
 import time
-
+import json
+import sys
 import torch
 import numpy as np
 import faiss
 from torchvision.models import resnet152, ResNet152_Weights
 from torchvision.transforms import Compose, Resize, ToTensor, Normalize
-from PIL import Image
-
-from api import getImage
-from utility import display_asset_column
-from api import getAssetInfo
-from db import load_duplicate_pairs, is_db_populated, save_duplicate_pair
+import imageProcessing
+import immich
+from utility import display_asset_column, display_asset_info
+from immich import get_asset_info
 from streamlit_image_comparison import image_comparison
+from datetime import datetime, timezone
+import logging
+logger = logging.getLogger(__name__)
 
 # Set the environment variable to allow multiple OpenMP libraries
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -39,235 +42,128 @@ transform = Compose([
 index_path = 'faiss_index.bin'
 metadata_path = 'metadata.npy'
 
-def extract_features(image):
-    """Extract features from an image using a pretrained model."""
-    image_tensor = transform(image).unsqueeze(0)  # Add batch dimension
-    with torch.no_grad():
-        features = model(image_tensor)
-    return features.numpy().flatten()
-
-def init_or_load_faiss_index():
-    """Initialize or load the FAISS index and metadata, ensuring index is ready for use."""
-    if os.path.exists(index_path) and os.path.exists(metadata_path):
-        index = faiss.read_index(index_path)
-        metadata = np.load(metadata_path, allow_pickle=True).tolist()
+def selected_metadata(assets):
+    best_image_infos = None
+    asset_infos = []
+    # Fetch asset information and select the one with the largest resolution or if equal the largest image size
+    for asset in assets:
+        asset_id = asset['id']
+        asset_info = immich.get_asset_info(asset_id)
+        asset_infos.append(asset_info)
+        if best_image_infos is None:
+            best_image_infos = asset_info
+        else:
+            best_image_resolution = best_image_infos['exifInfo']['exifImageWidth'] * best_image_infos['exifInfo']['exifImageHeight']
+            image_resolution = asset_info['exifInfo']['exifImageWidth'] * asset_info['exifInfo']['exifImageHeight']
+            # Prefer larger resolution
+            if image_resolution > best_image_resolution:
+                best_image_infos = asset_info
+            # If equal resolution, prefer the one with the larger file size
+            elif image_resolution == best_image_resolution:
+                if asset_info['exifInfo']['fileSizeInByte'] > best_image_infos['exifInfo']['fileSizeInByte']:
+                    best_image_infos = asset_info
+    # Select best image to keep
+    st.session_state['keepImageId'] = best_image_infos['id']
+    # If any asset is marked as favorite, set favorite
+    st.session_state['isFavorite'] = any(info['isFavorite'] for info in asset_infos)
+    # Prefere oldest dateTimeOriginal
+    parsed_date_time_original = [datetime.fromisoformat(info['exifInfo']['dateTimeOriginal']) for info in asset_infos]
+    st.session_state["dateTimeOriginal"] = min(parsed_date_time_original).astimezone(timezone.utc).isoformat(timespec='milliseconds')
+    # Append all descriptions
+    st.session_state["description"] = ''.join(info['exifInfo']['description'] for info in asset_infos)
+    # Use any location... User has to confirm it.
+    latitudes = [info['exifInfo']['latitude'] for info in asset_infos if info['exifInfo']['latitude'] is not None]
+    longitudes = [info['exifInfo']['longitude'] for info in asset_infos if info['exifInfo']['longitude'] is not None]
+    st.session_state["latitude"] = latitudes[0] if latitudes else None
+    st.session_state["longitude"] = longitudes[0] if longitudes else None
+    # Use the highest rating
+    ratings = [info['exifInfo']['rating'] for info in asset_infos if info['exifInfo']['rating'] is not None]
+    st.session_state["rating"] = max(ratings) if ratings else None
+    # Use the original live photo video ID
+    st.session_state["livePhotoVideoId"] = best_image_infos['livePhotoVideoId']
+    # Frefer the visibility that is the most restrictive
+    if any(info['visibility'] == 'locked' for info in asset_infos):
+        st.session_state["visibility"] = 'locked'
+    elif any(info['visibility'] == 'hidden' for info in asset_infos):
+        st.session_state["visibility"] = 'hidden'
+    elif any(info['visibility'] == 'archive' for info in asset_infos):
+        st.session_state["visibility"] = 'archive'
     else:
-        index = None
-        metadata = []
-    return index, metadata
+        st.session_state["visibility"] = 'timeline'
+    # Get the IDs of the images to delete
+    image_ids_to_delete = [asset['id'] for asset in assets if asset['id'] != best_image_infos['id']]
+    st.session_state.metadata_merged = True
+    return best_image_infos["id"], image_ids_to_delete
 
-def save_faiss_index_and_metadata(index, metadata):
-    """Save the FAISS index and metadata to disk."""
-    faiss.write_index(index, index_path)
-    np.save(metadata_path, np.array(metadata, dtype=object))
 
-def update_faiss_index(immich_server_url,api_key, asset_id):
-    
-    """Update the FAISS index and metadata with a new image and its ID, 
-    skipping if the asset_id has already been processed."""
-    global index  # Assuming index is defined globally
-    index, existing_metadata = init_or_load_faiss_index()
-    
-    # Check if the asset_id is already in metadata to decide whether to skip processing
-    if asset_id in existing_metadata:
-        return 'skipped'  # Skip processing this image
+def set_state(key: str, value):
+    logger.info(f"Setting session state: {key} = {value}")
+    st.session_state[key] = value
 
-    image = getImage(asset_id, immich_server_url, "Thumbnail (fast)", api_key)
-    if image is not None:
-        features = extract_features(image)
-    else:
-        return 'error'
-    
-    if index is None:
-        # Initialize the FAISS index with the correct dimension if it's the first time
-        dimension = features.shape[0]
-        index = faiss.IndexFlatL2(dimension)
-    
-    index.add(np.array([features], dtype='float32'))
-    existing_metadata.append(asset_id)
-    
-    save_faiss_index_and_metadata(index, existing_metadata)
-    return 'processed'
+def set_state_location(latitude: str, longitude: str):
+    logger.info(f"Setting {latitude=} and {latitude=}")
+    st.session_state["latitude"] = latitude
+    st.session_state["longitude"] = longitude
 
-def calculateFaissIndex(assets, immich_server_url, api_key):
-    # Initialize session state variables if they are not already set
-    if 'message' not in st.session_state:
-        st.session_state['message'] = ""
-    if 'progress' not in st.session_state:
-        st.session_state['progress'] = 0
-    if 'stop_index' not in st.session_state:
-        st.session_state['stop_index'] = False
 
-    # Set up the UI components
-    progress_bar = st.progress(st.session_state['progress'])
-    stop_button = st.button('Stop Index Processing')
-    message_placeholder = st.empty()
+def next_duplicate():
+    st.session_state.duplicate_number = st.session_state.duplicate_number + 1
+    st.session_state.metadata_merged = False
+    st.session_state['image_files'] = {}
 
-    # Check if stop was requested and reset it if button is pressed
-    if stop_button:
-        st.session_state['stop_index'] = True
-        st.session_state['calculate_faiss'] = False
 
-    total_assets = len(assets)
-    processed_assets = 0
-    skipped_assets = 0
-    error_assets = 0
-    total_time = 0
+def display_duplicates():
+    progress_bar = st.progress(0, text="Processing duplicates ...")
+    duplicates = st.session_state.duplicates[st.session_state.duplicate_number]
+    progress_bar.progress(st.session_state.duplicate_number / st.session_state.duplicates_count, text=f"Processing duplicates {st.session_state.duplicate_number} / {st.session_state.duplicates_count}")
+    duplicate_assets = duplicates['assets']
+    if not st.session_state.get("metadata_merged", False):
+        selected_metadata(duplicate_assets)
+    columns = st.columns(len(duplicate_assets) + 1, vertical_alignment="center")
+    for column_number, asset in enumerate(duplicate_assets):
+        asset_info = immich.get_asset_info(asset['id'])
+        with columns[column_number]:
+            resolution = immich.ImageResolution.THUMBNAIL if "thumbnail" in st.session_state.load_image_quality.lower() else immich.ImageResolution.ORIGINAL
+            key = f"{column_number}_{resolution.value}"
+            if not key in st.session_state['image_files']:
+                st.session_state['image_files'][key] = immich.get_asset_image(asset["id"], resolution)
+            st.image(st.session_state['image_files'][key])
+            currently_selected_image = st.session_state["keepImageId"] == asset['id']
+            st.button(":green[Selected✅]" if currently_selected_image else "Keep image", disabled=True if currently_selected_image else False, on_click=set_state, args=["keepImageId", asset['id']], key=asset["id"])
+            st.caption(asset['originalFileName'])
 
-    for i, asset in enumerate(assets):
-        if st.session_state['stop_index']:
-            st.session_state['message'] = "Processing stopped by user."
-            message_placeholder.text(st.session_state['message'])
-            break  # Break the loop if stop is requested
+            date_time_original = asset_info["exifInfo"]["dateTimeOriginal"]
+            st.button(f":green[{date_time_original}]" if datetime.fromisoformat(date_time_original) == datetime.fromisoformat(st.session_state["dateTimeOriginal"]) else f"{date_time_original}", key=f"{asset['id']}date_time_original", type="tertiary", on_click=set_state, args=["dateTimeOriginal", date_time_original])
+            if st.session_state["latitude"] is not None and st.session_state["longitude"] is not None:
+                with st.container(height=300):
+                    currently_selected_location = st.session_state["latitude"] == asset_info["exifInfo"]["latitude"] and st.session_state["longitude"] == asset_info["exifInfo"]["longitude"]
+                    if asset_info["exifInfo"]["latitude"] and asset_info["exifInfo"]["longitude"]:
+                        df = pd.DataFrame(
+                            [[asset_info["exifInfo"]["latitude"], asset_info["exifInfo"]["longitude"]]],
+                            columns=["lat", "lon"],
+                        )
+                        st.map(df, height=200)
+                        st.button(":green[Selected✅]" if currently_selected_location else "Select location", key=f"{asset['id']}{asset_info["exifInfo"]["latitude"]}", disabled=True if currently_selected_location else False, on_click=set_state_location, args=[asset_info["exifInfo"]["latitude"], asset_info["exifInfo"]["longitude"]])
+            rating = asset_info['exifInfo']['rating']
+            st.button(f":green[Rating: {rating}]" if rating == st.session_state["rating"] else f"Rating: {rating}", key=f"{asset['id']}rating", type="tertiary", on_click=set_state, args=["rating", rating])
+            visibility = asset_info['visibility']
+            st.button(f":green[Visibility: {visibility}]" if visibility == st.session_state["visibility"] else f"Visibility: {visibility}", key=f"{asset['id']}visibility", type="tertiary", on_click=set_state, args=["visibility", visibility])
+            
+            is_favorite = asset_info['isFavorite']
+            st.button(f":green[Is Favorite: {is_favorite}]" if is_favorite == st.session_state["isFavorite"] else f"Is Favorite: {is_favorite}", key=f"{asset['id']}isFavorite", type="tertiary", on_click=set_state, args=["isFavorite", is_favorite])
 
-        asset_id = asset.get('id')
-        start_time = time.time()
+            st.caption(f"Is Archived: {asset['isArchived']}")
+            st.caption(f"Is Trashed: {asset['isTrashed']}")
+            st.caption(f"Description: {asset['exifInfo']["description"]}")
+    with columns[-1]:
+        st.button("Skip", icon=":material/double_arrow:", on_click=next_duplicate)
+        st.button("Apply", icon=":material/check:", on_click=next_duplicate)
 
-        status = update_faiss_index(immich_server_url,api_key, asset_id)
-        if status == 'processed':
-            processed_assets += 1
-        elif status == 'skipped':
-            skipped_assets += 1
-        elif status == 'error':
-            error_assets += 1
 
-        end_time = time.time()
-        processing_time = end_time - start_time
-        total_time += processing_time
-
-        # Update progress and messages
-        progress_percentage = (i + 1) / total_assets
-        st.session_state['progress'] = progress_percentage
-        progress_bar.progress(progress_percentage)
-        estimated_time_remaining = (total_time / (i + 1)) * (total_assets - (i + 1))
-        estimated_time_remaining_min = int(estimated_time_remaining / 60)
-
-        st.session_state['message'] = f"Processing asset {i + 1}/{total_assets} - (Processed: {processed_assets}, Skipped: {skipped_assets}, Errors: {error_assets}). Estimated time remaining: {estimated_time_remaining_min} minutes."
-        message_placeholder.text(st.session_state['message'])
-
-    # Reset stop flag at the end of processing
-    st.session_state['stop_index'] = False
-    if processed_assets >= total_assets:
-        st.session_state['message'] = "Processing complete!"
-        message_placeholder.text(st.session_state['message'])
-        progress_bar.progress(1.0)
-
-def generate_db_duplicate():
-    st.write("Database initialization")
-    index, metadata = init_or_load_faiss_index()
-    if not index or not metadata:
-        st.write("FAISS index or metadata not available.")
-        return
-
-    # Check and update the stop mechanism in session state
-    if 'stop_requested' not in st.session_state:
-        st.session_state['stop_requested'] = False
-
-    # Button to request stopping
-    if st.button('Stop Finding Duplicates'):
-        st.session_state['stop_requested'] = True
-        st.session_state['generate_db_duplicate'] = False
-
-    num_vectors = index.ntotal
-    message_placeholder = st.empty()
-    progress_bar = st.progress(0)
-
-    for i in range(num_vectors):
-        # Check if stop has been requested
-        if st.session_state['stop_requested']:
-            message_placeholder.text("Processing was stopped by the user.")
-            progress_bar.empty()
-            # Optionally, reset the stop flag here if you want the process to be restartable without refreshing the page
-            st.session_state['stop_requested'] = False
-            return None
-
-        progress = (i + 1) / num_vectors
-        message_placeholder.text(f"Finding duplicates: processing vector {i+1} of {num_vectors}")
-        progress_bar.progress(progress)
-
-        query_vector = np.array([index.reconstruct(i)])
-        distances, indices = index.search(query_vector, 2)
-
-        for j in range(1, indices.shape[1]):
-            #if distances[0][j] < threshold:
-            idx1, idx2 = i, indices[0][j]
-            if idx1 != idx2:
-                sorted_pair = (min(idx1, idx2), max(idx1, idx2))
-                # Check if the indices in sorted_pair are within the bounds of metadata
-                if sorted_pair[0] < len(metadata) and sorted_pair[1] < len(metadata):
-                    save_duplicate_pair(metadata[sorted_pair[0]], metadata[sorted_pair[1]], distances[0][j])
-                else:
-                    st.error(f"Metadata index out of range: {sorted_pair}")
-                    # Optionally log more details or handle this case further
-
-    message_placeholder.text(f"Finished processing {num_vectors} vectors.")
-    progress_bar.empty()
-
-def show_duplicate_photos_faiss(assets, limit, min_threshold, max_threshold,immich_server_url,api_key):
-    # First check if the database is populated
-    if not is_db_populated():
-        st.write("The database does not contain any duplicate entries. Please generate/update the database.")
-        return  # Exit the function early if the database is not populated
-    
-    # Load duplicates from database
-    duplicates = load_duplicate_pairs(min_threshold, max_threshold)
-
-    if duplicates:
-        st.write(f"Found {len(duplicates)} duplicate pairs with FAISS code within threshold {min_threshold} < x < {max_threshold}:")
-        progress_bar = st.progress(0)
-        num_duplicates_to_show = min(len(duplicates), limit)
-
-        for i, dup_pair in enumerate(duplicates[:num_duplicates_to_show]):
-            try:
-                # Check if stop was requested
-                if st.session_state.get('stop_requested', False):
-                    st.write("Processing was stopped by the user.")
-                    st.session_state['stop_requested'] = False  # Reset the flag for future operations
-                    st.session_state['generate_db_duplicate'] = False
-                    break  # Exit the loop
-
-                progress = (i + 1) / num_duplicates_to_show
-                progress_bar.progress(progress)
-
-                asset_id_1, asset_id_2 = dup_pair
-
-                image1 = getImage(asset_id_1, immich_server_url, 'Thumbnail (fast)', api_key)
-                image2 = getImage(asset_id_2, immich_server_url, 'Thumbnail (fast)', api_key)
-                asset1_info = getAssetInfo(asset_id_1, assets)
-                asset2_info = getAssetInfo(asset_id_2, assets)
-
-                if image1 is not None and image2 is not None:
-                    # Convert PIL images to numpy arrays if necessary
-                    image1 = np.array(image1)
-                    image2 = np.array(image2)
-                    # Proceed with image comparison
-                    image_comparison(
-                        img1=image1,
-                        img2=image2,
-                        label1=f"Name: {asset_id_1}",
-                        label2=f"Name: {asset_id_2}",
-                        width=700,
-                        starting_position=50,
-                        show_labels=True,
-                        make_responsive=True,
-                        in_memory=False,
-                    )
-
-                    col1, col2 = st.columns(2)
-                #    with col1:
-                #        st.image(image1, caption=f"Name: {asset_id_1}")
-                #    with col2:
-                #        st.image(image2, caption=f"Name: {asset_id_2}")
-                    
-                    display_asset_column(col1, asset1_info, asset2_info, asset_id_1,asset_id_2, immich_server_url, api_key)
-                    display_asset_column(col2, asset2_info, asset1_info, asset_id_2,asset_id_1, immich_server_url, api_key)
-                else:
-                    st.write(f"Missing information for one or both assets: {asset_id_1}, {asset_id_2}")
-
-                st.markdown("---")
-            except:
-                st.write(f"Missing information for one or both assets")
-        progress_bar.progress(100)
-    else:
-        st.write("No duplicates found.")
-
+def load_duplicates_from_server() -> int:
+    if st.session_state.duplicates is None:
+        print("fetching...")
+        with st.spinner('Fetching assets from server...'):
+            st.session_state.duplicates = immich.get_duplicates()
+            st.session_state.duplicates_count = len(st.session_state.duplicates) if st.session_state.duplicates else 0
+            logging.info(f"Loaded {st.session_state.duplicates_count} assets with duplicates from server.")

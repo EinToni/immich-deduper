@@ -2,11 +2,29 @@ import requests, json
 import streamlit as st
 from PIL import Image, UnidentifiedImageError, ImageFile
 from io import BytesIO
-from db import bytes_to_megabytes
 from pillow_heif import register_heif_opener
 import os
+from enum import Enum
+import logging
+logger = logging.getLogger(__name__)
 
-@st.cache_data(show_spinner=True) 
+
+def ping_server() -> bool:
+    try:
+        response = requests.get(f"{st.session_state['immich_server_url']}/api/server/ping", headers={'Accept': 'application/json'}, timeout=1000)
+        if response.ok:
+            return True
+    except:
+        return False
+
+
+def is_api_key_valid():
+    if get_from_authenticated_api("system-config"):
+        return True
+    return False
+
+
+@st.cache_data
 def fetchAssets(immich_server_url, api_key, timeout, type):
     # Initialize messaging and progress
     if 'fetch_message' not in st.session_state:
@@ -54,71 +72,38 @@ def fetchAssets(immich_server_url, api_key, timeout, type):
     message_placeholder.text(st.session_state['fetch_message'])
     return assets
 
-def getImage(asset_id, immich_server_url,photo_choice,api_key):   
-    # Determine whether to fetch the original or thumbnail based on user selection
-    register_heif_opener()
-    ImageFile.LOAD_TRUNCATED_IMAGES = True
-    if photo_choice == 'Thumbnail (fast)':
-        response = requests.request("GET", f"{immich_server_url}/api/asset/thumbnail/{asset_id}?format=JPEG", headers={'Accept': 'application/octet-stream','x-api-key': api_key}, data={})
+class ImageResolution(Enum):
+    THUMBNAIL = "thumbnail"
+    FULLSIZE = "fullsize"
+    ORIGINAL = "original"
+
+@st.cache_data(max_entries=25)
+def get_asset_image(asset_id: str, resolution: ImageResolution):
+    print(f"Fetching image for asset_id: {asset_id} with resolution: {resolution}")
+    """Fetches an image for a given asset ID and resolution."""
+    if resolution == ImageResolution.THUMBNAIL or resolution == ImageResolution.FULLSIZE:
+        image = get_from_authenticated_api(f"assets/{asset_id}/thumbnail?size={resolution.value}", type="octet-stream")
     else:
-        asset_download_url = f"{immich_server_url}/api/download/asset/{asset_id}"
-        response = requests.post(asset_download_url, headers={'Accept': 'application/octet-stream', 'x-api-key': api_key}, stream=True)
-        
-    if response.status_code == 200 and 'image/' in response.headers.get('Content-Type', ''):
-        image_bytes = BytesIO(response.content)
+        image = get_from_authenticated_api(f"assets/{asset_id}/original", type="octet-stream")
+    if image:
+        image_bytes = BytesIO(image.content)
         try:
             image = Image.open(image_bytes)
-            image.load()  # Force loading the image data while the file is open
-            image_bytes.close()  # Now we can safely close the stream
+            image.load()
             return image
         except UnidentifiedImageError:
-            print(f"Failed to identify image for asset_id {asset_id}. Content-Type: {response.headers.get('Content-Type')}")
-            image_bytes.close()  # Ensure the stream is closed even if an error occurs
-            return None
+            logger.error(f"Failed to identify image for asset_id {asset_id}. Content-Type: {image.headers.get('Content-Type')}")
         finally:
-            image_bytes.close()  # Ensure the stream is always closed
-            del image_bytes 
-    else:
-        print(f"Skipping non-image asset_id {asset_id} with Content-Type: {response.headers.get('Content-Type')}")
-        return None
+            image_bytes.close()
+    return None
 
-def getAssetInfo(asset_id, assets):
-    # Search for the asset in the provided list of assets.
-    asset_info = next((asset for asset in assets if asset['id'] == asset_id), None)
+def get_asset_info(asset_id: str) -> dict | None:
+    """"Fetches asset information for a given asset ID."""
+    info = get_from_authenticated_api(f"assets/{asset_id}")
+    if info:
+        return info.json()
+    return None
 
-    if asset_info:
-        # Extract all required info.
-        try:
-            formatted_file_size = bytes_to_megabytes(asset_info['exifInfo']['fileSizeInByte'])
-        except KeyError:
-            formatted_file_size = "Unknown"
-        
-        original_file_name = asset_info.get('originalFileName', 'Unknown')
-        resolution = "{} x {}".format(
-            asset_info.get('exifInfo', {}).get('exifImageHeight', 'Unknown'), 
-            asset_info.get('exifInfo', {}).get('exifImageWidth', 'Unknown')
-        )
-        lens_model = asset_info.get('exifInfo', {}).get('lensModel', 'Unknown')
-        creation_date = asset_info.get('fileCreatedAt', 'Unknown')
-        original_path = asset_info.get('originalPath', 'Unknown')
-        is_offline = asset_info.get('isOffline', False)
-        is_trashed = asset_info.get('isTrashed', False)  # Extract isTrashed
-        is_favorite = asset_info.get('isFavorite', False)        
-        # Add more fields as needed and return them
-        return formatted_file_size, original_file_name, resolution, lens_model, creation_date, original_path, is_offline, is_trashed,is_favorite
-    else:
-        return None
-    
-def getServerStatistics(immich_server_url, api_key):
-    try:
-        response = requests.get(f"{immich_server_url}/api/server-info/statistics", headers={'Accept': 'application/json', 'x-api-key': api_key})
-        if response.ok:        
-            return response.json()  # This will parse the JSON response body and return it as a dictionary
-        else:
-            return None
-    except:
-        return None
-    
 def deleteAsset(immich_server_url, asset_id, api_key):
     st.session_state['show_faiss_duplicate'] = False
     url = f"{immich_server_url}/api/asset"
@@ -183,24 +168,28 @@ def updateAsset(immich_server_url, asset_id, api_key, dateTimeOriginal, descript
         st.error(f"Request failed: {str(e)}")
         print(f"Request failed: {str(e)}")
         return False
-    
-#For video function
-def getVideoAndSave(asset_id, immich_server_url,api_key,save_directory):   
-    # Ensure the directory exists
-    if not os.path.exists(save_directory):
-        os.makedirs(save_directory)
 
-    response = requests.get(f"{immich_server_url}/api/download/asset/{asset_id}", headers={'Accept': 'application/octet-stream', 'x-api-key': api_key}, stream=True)
-    file_path = os.path.join(save_directory, f"{asset_id}.mp4")
 
-    if response.status_code == 200 and 'video/' in response.headers.get('Content-Type', ''):
-        try:
-            with open(file_path, 'wb') as f:
-                f.write(response.content)
-            return file_path
-        except Exception as e:
-            print(f"Failed to save video for asset_id {asset_id}. Error: {e}")
-            return None
-    else:
-        print(f"Failed to retrieve video for asset_id {asset_id}. Status Code: {response.status_code}, Content-Type: {response.headers.get('Content-Type')}")
+def get_duplicates():
+    response = get_from_authenticated_api("duplicates", type="octet-stream")
+    if response:
+        return response.json()
+    return None
+
+
+def get_from_authenticated_api(endpoint: str, type="json", params=None) -> requests.Response | None:
+    """Fetch data from the Immich API with API key."""
+    if not st.session_state['immich_server_url'] or not st.session_state['immich_api_key']:
+        logging.error(f"{st.session_state['immich_server_url']=} and {st.session_state['immich_api_key']=} must be set before making requests.")
         return None
+    
+    url = f"{st.session_state['immich_server_url']}/api/{endpoint.lstrip('/')}"
+    headers = {'Accept': f'application/{type}', 'x-api-key': st.session_state['immich_api_key']}
+    logging.debug(f"Fetching data from {url=} with {headers=} and {params=}")
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=st.session_state['request_timeout'])
+        response.raise_for_status()
+        return response
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error fetching data from {url}: {e}")
+    return None

@@ -1,8 +1,7 @@
 from datetime import datetime
 import streamlit as st
 from datetime import datetime
-from api import deleteAsset, updateAsset
-from db import delete_duplicate_pair
+from immich import deleteAsset, updateAsset
 
 def compare_and_color_data(value1, value2):
     date1 = datetime.fromisoformat(value1.rstrip('Z'))
@@ -23,6 +22,19 @@ def compare_and_color(value1, value2):
         return f"<span style='color: red;'>{value1}</span>"
     else:
         return f"{value1}"
+
+def display_asset_info(assets):
+    col1, col2 = st.columns([1, 3]) 
+    with col1:
+        st.header("Actions")
+
+        # Generate 10 buttons vertically in this column
+        for i in range(10):
+            if st.button(f"Button {i+1}", use_container_width=True, type="tertiary"):
+                st.success(f"Button {i+1} clicked!")
+
+    with col2:
+        st.write("This is a space for other content.")
 
 def display_asset_column(col, asset1_info, asset2_info, asset_id_1,asset_id_2, server_url, api_key):
     details = f"""
@@ -49,7 +61,7 @@ def display_asset_column(col, asset1_info, asset2_info, asset_id_1,asset_id_2, s
                     st.session_state['show_faiss_duplicate'] = True
                     st.session_state['generate_db_duplicate'] = False
                     #remove from asset db
-                    delete_duplicate_pair(asset_id_1,asset_id_2)
+                    #delete_duplicate_pair(asset_id_1,asset_id_2)
                 else:
                     st.error(f"Failed to delete photo {asset_id_1}")
             except Exception as e:
