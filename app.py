@@ -32,7 +32,8 @@ def main():
         if st.session_state.duplicates:
             imageDuplicate.display_duplicates()
         else:
-            st.text("No duplicates found!")
+            st.header("🥳🥳 No duplicates found! 🥳🥳")
+            st.balloons()
 
 
 if __name__ == "__main__":

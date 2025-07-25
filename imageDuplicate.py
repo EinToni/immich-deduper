@@ -40,8 +40,6 @@ def selected_metadata(assets):
     # Use any location... User has to confirm it.
     latitudes = [info['exifInfo']['latitude'] for info in asset_infos if info['exifInfo']['latitude'] is not None]
     longitudes = [info['exifInfo']['longitude'] for info in asset_infos if info['exifInfo']['longitude'] is not None]
-    print("latitudes, longitudes")
-    print(latitudes, longitudes)
     st.session_state.metadata_to_update["latitude"] = latitudes[0] if latitudes else None
     st.session_state.metadata_to_update["longitude"] = longitudes[0] if longitudes else None
     # Use the highest rating
@@ -68,6 +66,10 @@ def set_metadata_to_update(key: str, value):
     logger.info(f"Setting session state: metadata_to_update[{key}] = {value}")
     st.session_state.metadata_to_update[key] = value
 
+def set_session_state(key: str, value):
+    logger.info(f"Setting session state: {key} = {value}")
+    st.session_state[key] = value
+
 
 def set_state_location(latitude: str, longitude: str):
     logger.info(f"Setting metadata_to_update {latitude=} and {latitude=}")
@@ -79,6 +81,8 @@ def next_duplicate():
     st.session_state.duplicate_number = st.session_state.duplicate_number + 1
     st.session_state.metadata_merged = False
     st.session_state['image_files'] = {}
+    if st.session_state.duplicate_number >= st.session_state.duplicates_count:
+        st.session_state.duplicates = None
 
 
 def get_current_duplicate():
@@ -87,10 +91,14 @@ def get_current_duplicate():
 
 def apply_deduplicate():
     asset_id_to_update = st.session_state['keepImageId']
+    if asset_id_to_update not in [asset["id"] for asset in get_current_duplicate()]:
+        st.error(f"Cannot apply deduplication, {asset_id_to_update} is not part of the current duplicate set.")
+        return
     assets_to_delete = [asset["id"] for asset in get_current_duplicate() if asset["id"] != asset_id_to_update]
     logger.info(f"Applying deduplication: updating {asset_id_to_update} and deleting {assets_to_delete}")
     immich.update_asset(asset_id_to_update, st.session_state.metadata_to_update)
-    immich.delete_assets(asset_id_to_update)
+    immich.delete_assets(assets_to_delete)
+    next_duplicate()
 
 
 def display_duplicates():
@@ -110,7 +118,8 @@ def display_duplicates():
                 st.session_state.image_files[key] = immich.get_asset_image(asset["id"], resolution)
             st.image(st.session_state.image_files[key])
             currently_selected_image = st.session_state.keepImageId == asset['id']
-            st.button(":green[Selected✅]" if currently_selected_image else "Keep image", disabled=True if currently_selected_image else False, on_click=set_metadata_to_update, args=["keepImageId", asset['id']], key=asset["id"])
+            st.button(":green[Selected✅]" if currently_selected_image else "Keep image", disabled=True if currently_selected_image else False, on_click=set_session_state, args=["keepImageId", asset['id']], key=f"{asset["id"]}Image")
+            st.caption(asset['id'])
             st.caption(asset['originalFileName'])
 
             date_time_original = asset_exif["dateTimeOriginal"]

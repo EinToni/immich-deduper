@@ -79,7 +79,7 @@ class ImageResolution(Enum):
 
 @st.cache_data(max_entries=25)
 def get_asset_image(asset_id: str, resolution: ImageResolution):
-    logger.info(f"Fetching image for asset_id: {asset_id} with resolution: {resolution}")
+    logger.debug(f"Fetching image for asset_id: {asset_id} with resolution: {resolution}")
     """Fetches an image for a given asset ID and resolution."""
     if resolution == ImageResolution.THUMBNAIL or resolution == ImageResolution.FULLSIZE:
         image = get_from_authenticated_api(f"assets/{asset_id}/thumbnail?size={resolution.value}", accept_type="octet-stream")
@@ -108,21 +108,18 @@ def get_asset_info(asset_id: str) -> dict | None:
 
 def delete_assets(asset_ids: list[str]):
     payload = json.dumps({
-        "force": True,
-        "ids": [asset_ids]
+        "ids": asset_ids
     })
-    print(payload)
     result = delete_authenticated_api("assets", payload)
-    if result:
-        logger.info(f"Delete assets resulted in: {result.json()}")
-
+    if result.status_code != 204:
+        st.error(f"Failed to delete assets: {result.status_code} - {result.text}")
 
 
 def update_asset(asset_id, metadata_to_update: dict):
     payload = json.dumps(metadata_to_update)
     result = put_authenticated_api(f"assets/{asset_id}", payload=payload)
     if result:
-        logger.info(f"Update asset resulted in: {result.json()}")
+        logger.debug(f"Update asset resulted in: {result.json()}")
 
 
 def get_duplicates():
@@ -132,7 +129,7 @@ def get_duplicates():
     return None
 
 
-def get_from_authenticated_api(endpoint: str, accept_type="json", content_type=None, payload=None) -> requests.Response | None:
+def get_from_authenticated_api(endpoint: str, accept_type="json") -> requests.Response | None:
     """Fetch data from the Immich API with API key."""
     if not st.session_state['immich_server_url'] or not st.session_state['immich_api_key']:
         logging.error(f"{st.session_state['immich_server_url']=} and {st.session_state['immich_api_key']=} must be set before making requests.")
@@ -172,8 +169,8 @@ def delete_authenticated_api(endpoint: str, payload=None) -> requests.Response |
 def try_api_request(method: str, endpoint: str, headers, payload=None) -> requests.Response | None:
     url = f"{st.session_state['immich_server_url']}/api/{endpoint.lstrip('/')}"
     try:
-        response = requests.request(method, url, headers=headers, params=payload, timeout=st.session_state['request_timeout'])
-        logging.info(f"Executing API call {method} {url=} with {headers=} and {payload=} returned status code: {response.status_code}")
+        response = requests.request(method, url, headers=headers, data=payload, timeout=st.session_state['request_timeout'])
+        logging.debug(f"Executing API call {method} {url=} with {headers=} and {payload=} returned status code: {response.status_code}")
         response.raise_for_status()
         return response
     except requests.exceptions.RequestException as e:
